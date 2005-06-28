@@ -35,11 +35,9 @@ iterations."
     `(let ((,last-time))
       (tagbody
        top
-	 (setf ,last-time (#+sbcl sb-int:psxhash
-			   #-sbcl simple-checksum ,var))
+	 (setf ,last-time (simple-checksum ,var))
 	 ,@body
-	 (unless (equal ,last-time (#+sbcl sb-int:psxhash
-				    #-sbcl simple-checksum ,var))
+	 (unless (equal ,last-time (simple-checksum ,var))
 	   (go top)))
       ,var)))
 

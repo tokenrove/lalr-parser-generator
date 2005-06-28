@@ -44,6 +44,8 @@ COMPUTE-SHIFTS, used in COMPUTE-REDUCTIONS.")
 (defun item-rhs (item) (second item))
 (defun item-dot (item) (third item))
 (defun item-la (item) (fourth item))
+(defun (setf item-la) (value item)
+  (setf (fourth item) value))
 
 (defun dot-at-end-p (item)
   (endp (item-dot item)))
@@ -67,7 +69,15 @@ non-destructive."
 
 (defun add-to-set (item set)
   "Returns position of ITEM in SET."
-  (or (position item set :test #'equalp)
+  (or (dotimes (i (length set))
+	(when (and (equal (item-lhs item) (item-lhs (aref set i)))
+		   (equal (item-rhs item) (item-rhs (aref set i)))
+		   (equal (item-dot item) (item-dot (aref set i))))
+	  (unless (equal (item-la item) (item-la (aref set i)))
+	    (setf (item-la (aref set i)) (union (item-la item)
+						(item-la (aref set i)))))
+	  (return i)))
+      ;(position item set :test #'equalp)
       (vector-push-extend item set)))
 
 
@@ -124,19 +134,19 @@ Sets *FIRST-SET*, *FOLLOW-SET*, and *NULLABLE-SET*."
 	       (k (length ys)))
 	      ((>= i k))
 
-	    (when (every #'nullable-p (and (> i 0) (subseq ys 0 (1- i))))
+	    ;; Note - subseq 0 0 is NIL, the intended effect here.
+	    (when (every #'nullable-p (subseq ys 0 i))
 	      (setf (gethash x first)
 		    (union (gethash x first)
 			   (gethash (nth i ys) first))))
 
-	    (when (every #'nullable-p (and (< i k) (subseq ys (1+ i) k)))
+	    (when (every #'nullable-p (subseq ys (1+ i) k))
 	      (setf (gethash (nth i ys) follow)
 		    (union (gethash (nth i ys) follow)
 			   (gethash x follow))))
 
 	    (loop for j from (1+ i) to k
-		  when (every #'nullable-p (and (> j (1+ i))
-						(subseq ys (1+ i) (1- j))))
+		  when (every #'nullable-p (subseq ys (1+ i) j))
 		  do (setf (gethash (nth i ys) follow)
 			   (union (gethash (nth i ys) follow)
 				  (gethash (nth j ys) first)))))))
@@ -168,6 +178,16 @@ Sets *FIRST-SET*, *FOLLOW-SET*, and *NULLABLE-SET*."
     (do-for-each-terminal (x *grammar*)
       (setf (gethash x first-set) (list x)))
     (do-until-unchanged (first-set)
+      (do-for-each-production (lhs rhs *grammar*)
+	(do ((r-> rhs (cdr r->))
+	     (done-p nil))
+	    ((or done-p (null r->)))
+	  (when (not (member (car r->) nullable)) 
+	    (setf (gethash lhs first-set)
+		  (union (gethash lhs first-set)
+			 (gethash (car r->) first-set)))
+	    (setf done-p t))))
+
       (do-for-each-production (lhs rhs *grammar*)
 	(do ((r-> rhs (cdr r->))
 	     (done-p nil))
@@ -210,9 +230,10 @@ Sets *FIRST-SET*, *FOLLOW-SET*, and *NULLABLE-SET*."
     (do-for-each-item (i item-set)
       (when (non-terminal-p (symbol-at-dot i))
 	(dolist (r (grammar-productions (symbol-at-dot i)))
-	  (dolist (w (first-sets (append (advance-dot i)
-					 (list (item-la i)))))
-	    (add-to-set (make-item (symbol-at-dot i) r r w) item-set))))))
+	  (add-to-set (make-item (symbol-at-dot i) r r
+				 (union (first-sets (advance-dot i))
+					(item-la i)))
+		      item-set)))))
   item-set)
 
 (defun lalr-goto (item-set grammar-symbol)
@@ -254,7 +275,7 @@ Sets *FIRST-SET*, *FOLLOW-SET*, and *NULLABLE-SET*."
 		 (equal (item-dot (car a)) (item-dot (car b))))
       (return nil))))
 
-(defun item-set-equal (set-a set-b)
+(defun item-set-equal-ignoring-la (set-a set-b)
   (block body
     (when (= (length set-a) (length set-b))
       (dotimes (i (length set-a))
@@ -267,12 +288,21 @@ Sets *FIRST-SET*, *FOLLOW-SET*, and *NULLABLE-SET*."
 	  (return-from body nil)))
       t)))
 
+
+(defun merge-la-in-sets (dst src)
+  (dotimes (i (length dst))
+    (unless (equal (item-la (aref dst i)) (item-la (aref src i)))
+      (setf (item-la (aref dst i)) (union (item-la (aref dst i))
+					  (item-la (aref src i)))))))
+
 (defun add-to-states (set states)
-  (block body
-    (dotimes (i (length states))
-      (when (item-set-equal set (aref states i))
-	(return-from body i)))
-    (vector-push-extend set states)))
+  (or
+   (dotimes (i (length states))
+     (when (item-set-equal-ignoring-la set (aref states i))
+       ;; find items which are same but for LA, merge LA.
+       (merge-la-in-sets (aref states i) set)
+       (return i)))
+   (vector-push-extend set states)))
 
 (defun compute-shifts ()
   "Compute shift actions for the generated parser.  Fills the *STATE*
@@ -298,12 +328,12 @@ variable and returns a list of shift actions."
   "Compute reduce actions for the generated parser.  Depends on
 *STATE* already being filled, and returns the reduce actions."
   (let ((reduce-table nil))
-    (do-for-each-item (item-set *states*)
-      (do-for-each-item (item item-set)
+    (dotimes (i (length *states*))
+      (do-for-each-item (item (aref *states* i))
 	(when (dot-at-end-p item)
-	  (pushnew (list (position item-set *states* :test #'equalp)
-			 (item-la item) item)
-		   reduce-table :test #'equalp))))
+	  (dolist (j (item-la item))
+	    (pushnew (list i j item)
+		     reduce-table :test #'equalp)))))
     reduce-table))
 
 
@@ -322,7 +352,10 @@ conflict resolution rule to any conflicts detected."
     (setf anaphora:it (make-array (list (length *states*))
 				  :initial-element nil)))
   (aif (aref (gethash x parse-table) i)
-       ;; XXX should probably collate the number of conflicts somewhere.
+       ;; XXX should probably collate the number of conflicts
+       ;; somewhere.
+       ;; XXX should resolve reduce/reduce conflicts by reducing by
+       ;; the largest rule.
        (warn "~&Conflict at ~A,~A -> last action ~A, new action ~A."
 	     x i it action)
   ;;   (assert (null (aref (gethash x parse-table) i)))
@@ -341,12 +374,61 @@ stored in *STATES*, which COMPUTE-SHIFTS fills in."
 
     (dolist (reduce reductions)
       (destructuring-bind (i x j) reduce
-	(add-to-parse-table parse-table i x
-			    (list 'reduce (list (item-lhs j)
-						(length (item-rhs j)))))))
+	(add-to-parse-table parse-table i x (list 'reduce
+						  (item-lhs j)
+						  (length (item-rhs j))))))
     (add-accept-actions parse-table)
 
     parse-table))
+
+
+(defun write-parser-function (table package stream)
+  (let ((*package* package))
+    (pprint `(in-package ,(package-name package)) stream)
+    (pprint `(labels ((unmash (entries)
+		       (let ((ht (make-hash-table)))
+			 (dolist (e entries)
+			   (setf (gethash (car e) ht) (cdr e)))
+			 ht)))
+	      (let ((table (unmash ',(let ((untable))
+					  (maphash (lambda (k v)
+						     (push (cons k v)
+							   untable))
+						   table)
+					  untable))))
+		(defun parse (next-token)
+		  "NEXT-TOKEN is a function which returns a cons of the next token in
+the input (the CAR being the symbol name, the CDR being any
+information the lexer would like to preserve), and advances the input
+one token.  Returns what might pass for a parse tree in some
+countries."
+		  (do* ((stack (list 0))
+			(token (funcall next-token))
+			(result-stack nil)
+			(row (gethash (car token) table)
+			     (gethash (car token) table)))
+		       (nil)
+		    (unless row
+		      (error "~A is not a valid token in this grammar." token))
+		    (let ((action (aref row (first stack))))
+		      (case (first action)
+			(shift
+			 (push token result-stack)
+			 (setf token (funcall next-token))
+			 (push (second action) stack))
+			(reduce
+			 (push (list (second action)) result-stack)
+			 (dotimes (i (third action))
+			   (pop stack)
+			   (push (pop (cdr result-stack)) (cdar result-stack)))
+			 (destructuring-bind (goto state)
+			     (aref (gethash (second action) table) (first stack))
+			   (assert (eql goto 'goto) (state) "Malformed parse table!")
+			   (push state stack)))
+			(accept (return (car result-stack)))
+			(t (error "Parse error at ~A" token))))))))
+	    stream)))
+
 
 
 (defun parse (table next-token)
@@ -355,6 +437,7 @@ function which returns a cons of the next token in the input (the CAR
 being the symbol name, the CDR being any information the lexer would
 like to preserve), and advances the input one token.  Returns what
 might pass for a parse tree in some countries."
+  (declare (optimize (debug 3)))
   (do* ((stack (list 0))
 	(token (funcall next-token))
 	(result-stack nil)
@@ -370,29 +453,29 @@ might pass for a parse tree in some countries."
 	 (setf token (funcall next-token))
 	 (push (second action) stack))
 	(reduce
-	 (destructuring-bind (lhs rhs-len) (second action)
-	   (push (list lhs) result-stack)
-	   (dotimes (i rhs-len) 
+	 (push (list (second action)) result-stack)
+	 (dotimes (i (third action))
 	     (pop stack)
 	     (push (pop (cdr result-stack)) (cdar result-stack)))
 	   (destructuring-bind (goto state)
-	       (aref (gethash lhs table) (first stack))
+	       (aref (gethash (second action) table) (first stack))
 	     (assert (eql goto 'goto) (state) "Malformed parse table!")
-	     (push state stack))))
+	     (push state stack)))
 	(accept (return (car result-stack)))
 	(t (error "Parse error at ~A" token))))))
 
 
 ;;;; External functions
 
-(defun make-parser (grammar &key end-symbol start-symbol)
+(defun make-parser (grammar &key end-symbol start-symbol
+		    (stream *standard-output*)
+		    (package *package*))
   (awhen end-symbol (setf +end-symbol+ it))
   (awhen start-symbol (setf +start-symbol+ it))
   (process-grammar grammar)
   (compute-prediction-sets)
   (let ((table (create-parse-table (compute-shifts) (compute-reductions))))
-    (lambda (&key (next-token (lambda () (list (read)))))
-      (parse table next-token))))
+    (write-parser-function table package stream)))
 
 
 ;;;; Testing stuff.
@@ -421,3 +504,8 @@ might pass for a parse tree in some countries."
        (c))
     X ((Y)
        (a))))
+
+(defparameter *simple-lalr-test-grammar*
+  '(S ((E))
+    E ((E - T) (T))
+    T ((n) (OPEN E CLOSE))))
