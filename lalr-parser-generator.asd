@@ -7,8 +7,10 @@
   :depends-on (:anaphora)
   :components
   ((:file "package")
-   (:file "macros" :depends-on ("package"))
-   (:file "parser" :depends-on ("package" "macros"))))
+   (:file "macros")
+   (:file "prediction")
+   (:file "parser"))
+  :serial t)
 
 (defsystem lalr-parser-generator-test
   :depends-on (:lalr-parser-generator :rt))

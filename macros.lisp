@@ -69,6 +69,7 @@ bound to the left-hand side and right-hand side (in the form of a list
 of tokens) of the grammar rule."
   (let ((value (gensym)))
     `(maphash (lambda (,lhs ,value)
+		(declare (ignorable ,lhs ,value))
 		(dolist (,rhs ,value)
 		  ,@body))
       ,grammar)))
@@ -77,7 +78,6 @@ of tokens) of the grammar rule."
   "Do BODY for each terminal symbol referenced in GRAMMAR."
   (let ((list (gensym))
 	(unused (gensym)))
-    (declare (ignore unused))
     `(do-for-each-production (,unused ,list ,grammar)
       (dolist (,var ,list)
 	(when (not (non-terminal-p ,var))
