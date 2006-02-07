@@ -1,0 +1,24 @@
+
+
+I recommend that you use cl-yacc by Juliusz Chroboczek instead of this
+package.  Among other things, his package properly supports operator
+precedence and so on, and is a lot more polished -- I bet it's way
+faster, too.
+
+If that's the case, why am I releasing this code?  Well, I had already
+written some things (like m68k-assembler) that depend on it.  Also,
+the code is much shorter and I feel it might be more understandable to
+someone unfamiliar with either package and looking to modify a parser
+generator.  Also, the default mode of operation for this package is to
+write the tables and parser to a stream, so you don't need to have
+this package around at runtime.
+
+
+Test suite:
+
+Unit tests and system tests.
+
+ - should verify that the output parser can parse some statements in
+the given language;
+ - should check number of shift/reduce and reduce/reduce conflicts
+against known values.

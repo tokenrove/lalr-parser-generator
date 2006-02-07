@@ -38,10 +38,11 @@ PROCESS-GRAMMAR.")
 
 (defstruct item (lhs) (rhs) (dot) (lookahead))
 
+;;; XXX should these dot functions operate on the dot itself, rather
+;;; than calling item-dot?  That would make it easier to hide the fact
+;;; that dot is just a list.
 (defun dot-at-end-p (item) (endp (item-dot item)))
-
 (defun symbol-at-dot (item) (car (item-dot item)))
-
 (defun advance-dot (item)
   "Returns the item dot, advanced by one symbol.  Note:
 non-destructive."
@@ -52,24 +53,29 @@ non-destructive."
 
 (defun make-item-set (&rest items)
   (let ((set (make-array '(0) :adjustable t :fill-pointer 0)))
-    (dolist (i items)
-      (add-to-set i set))
+    (dolist (i items) (add-to-set i set))
     set))
+
+
+(defun items-equal-except-lookahead-p (a b)
+  (every (lambda (x) (equal (funcall x a) (funcall x b)))
+	 (list #'item-lhs #'item-rhs #'item-dot)))
 
 (defun add-to-set (item set)
   "Returns position of ITEM in SET."
   (or (dotimes (i (length set))
-	(when (and (equal (item-lhs item) (item-lhs (aref set i)))
-		   (equal (item-rhs item) (item-rhs (aref set i)))
-		   (equal (item-dot item) (item-dot (aref set i))))
-	  (unless (equal (item-lookahead item) (item-lookahead
-						(aref set i)))
+	(when (items-equal-except-lookahead-p item (aref set i))
+	  (unless (equal (item-lookahead item) (item-lookahead (aref set i)))
 	    (setf (item-lookahead (aref set i))
 		  (union (item-lookahead item)
 			 (item-lookahead (aref set i)))))
 	  (return i)))
-      ;(position item set :test #'equalp)
+      ;;(position item set :test #'equalp)
       (vector-push-extend item set)))
+
+(defun item-set-equal-ignoring-la (set-a set-b)
+  (when (= (length set-a) (length set-b))
+    (every #'items-equal-except-lookahead-p set-a set-b)))
 
 
 ;;;; GRAMMAR
@@ -151,63 +157,39 @@ specified."  i))
     (make-item :lhs (item-lhs start-item) :rhs (item-rhs start-item)
 	       :dot dot)))
 
-;;; The code gets progressively uglier as I refine the data
-;;; structures.  Shame on me.
-
-#+nil
-(defun item-set-equal (set-a set-b)
-  (do ((a set-a (cdr a))
-       (b set-b (cdr b)))
-      ((and (endp a) (endp b)) t)
-    (unless (and (equal (item-lhs (car a)) (item-lhs (car b)))
-		 (equal (item-rhs (car a)) (item-rhs (car b)))
-		 (equal (item-dot (car a)) (item-dot (car b))))
-      (return nil))))
-
-(defun item-set-equal-ignoring-la (set-a set-b)
-  (block body
-    (when (= (length set-a) (length set-b))
-      (dotimes (i (length set-a))
-	(unless (and (equal (item-lhs (aref set-a i))
-			    (item-lhs (aref set-b i)))
-		     (equal (item-rhs (aref set-a i))
-			    (item-rhs (aref set-b i)))
-		     (equal (item-dot (aref set-a i))
-			    (item-dot (aref set-b i))))
-	  (return-from body nil)))
-      t)))
 
 
-(defun merge-la-in-sets (dst src)
-  (dotimes (i (length dst))
-    (unless (equal (item-lookahead (aref dst i))
-		   (item-lookahead (aref src i)))
-      (setf (item-lookahead (aref dst i))
-	    (union (item-lookahead (aref dst i))
-		   (item-lookahead (aref src i)))))))
+(defun merge-lookahead-in-sets (src dst)
+  (macrolet ((la (set) `(item-lookahead (aref ,set i))))
+    (dotimes (i (length dst))
+      (unless (equal (la dst) (la src))
+	(setf (la dst) (union (la dst) (la src)))))))
 
 (defun add-to-states (set states)
-  (or
-   (dotimes (i (length states))
-     (when (item-set-equal-ignoring-la set (aref states i))
-       ;; find items which are same but for LA, merge LA.
-       (merge-la-in-sets (aref states i) set)
-       (return i)))
-   (vector-push-extend set states)))
+  "Adds SET to STATES, either by merging it with another set which is
+identical save for look-ahead, or push it onto the end.  Returns the
+index in STATES."
+  (flet ((merge-existing ()
+	   (dotimes (i (length states))
+	     (when (item-set-equal-ignoring-la set (aref states i))
+	       (merge-lookahead-in-sets set (aref states i))
+	       (return i)))))
+    (or (merge-existing) (vector-push-extend set states))))
+
+(defun make-initial-state ()
+  (lalr-closure (make-item-set (make-start-item))))
 
 (defun compute-shifts ()
-  "Compute shift actions and states for the generated parser.  Returns
+  "Computes shift actions and states for the generated parser.  Returns
 a list of shift actions and the state table."
   (let ((shift-table nil)
 	(states (make-array '(1) :adjustable t :fill-pointer 1
-			     :initial-element
-			     (lalr-closure
-			      (make-item-set (make-start-item))))))
+			    :initial-element (make-initial-state))))
     (do-until-unchanged (states shift-table)
       (dotimes (i (length states))
 	(do-for-each-item (item (aref states i))
-	  (when (and (not (dot-at-end-p item))
-		     (not (eql (symbol-at-dot item) *end-symbol*)))
+	  (unless (or (dot-at-end-p item)
+		      (eql (symbol-at-dot item) *end-symbol*))
 	    (let* ((x (symbol-at-dot item))
 		   (new-set (lalr-goto (aref states i) x))
 		   (j (add-to-states new-set states)))
@@ -227,7 +209,15 @@ a list of shift actions and the state table."
     reduce-table))
 
 
+;; XXX revisit
 (defun add-accept-actions (parse-table states)
+  "Finds states whose next token should be $ (EOF) and adds accept
+actions to the parse table for those states."
+#|  (loop with n-states = (length states)
+	and item = (make-almost-done-item)
+	for i from 0 to n-states
+	when (find item (aref states i) :test #'equalp)
+	do (add-to-parse-table parse-table n-states i *end-symbol* '(accept)))) |#
   (do* ((i 0 (1+ i))
 	(n-states (length states))
 	(item (make-almost-done-item)))
@@ -248,6 +238,13 @@ conflict resolution rule to any conflicts detected."
        ;; the largest rule.
        (warn "~&Conflict at ~A,~A -> last action ~A, new action ~A."
 	     x i it action)
+       (cond ((and (eql it 'shift) (eql action 'reduce))
+	      ;; shift-reduce conflict
+	      )
+	     ((and (eql it 'reduce) (eql action 'reduce))
+	      ;; reduce-reduce conflict
+	      )
+	     (t (error "This is an unexpected conflict.  Call a wizard.")))
   ;;   (assert (null (aref (gethash x parse-table) i)))
        (setf (aref (gethash x parse-table) i) action)))
 
@@ -360,10 +357,13 @@ might pass for a parse tree in some countries."
 
 ;;;; External functions
 
+;; XXX document this, improve interface
 (defun make-parser (grammar &key end-symbol start-symbol
 		    (stream *standard-output*)
 		    (package *package*)
 		    (fn-name 'parse))
+  "Writes a parser for GRAMMAR onto STREAM, with symbols in PACKAGE;
+notably, with the parser name being FN-NAME (default of PARSE)."
   (awhen end-symbol (setf *end-symbol* it))
   (awhen start-symbol (setf *start-symbol* it))
   (let ((*grammar* (process-grammar grammar)))
@@ -412,3 +412,11 @@ might pass for a parse tree in some countries."
   '(S ((E))
     E ((E - T) (T))
     T ((n) (OPEN E CLOSE))))
+
+(defparameter *nicer-looking-test-grammar*
+"S = E
+ E = E - T
+   | T
+
+ T = n
+   | ( E )")
