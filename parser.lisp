@@ -78,11 +78,6 @@ non-destructive."
 (defun process-grammar (grammar)
   "Processes GRAMMAR, returns a grammar suitable for binding to
 *GRAMMAR*.  Augments the grammar with a new start rule."
-  ;; split grammar into hash table of non-terminals, terminals.
-
-  ;; the grammar is a list of non-terminals followed by their
-  ;; productions.
-  ;;
   ;; we compile the basic hash table of non-terminals by iterating
   ;; through the grammar, storing the lists of productions.
   (let ((grammar-hash (make-hash-table)))
@@ -91,15 +86,18 @@ non-destructive."
       (setf (gethash (car list->) grammar-hash) 
 	    (cadr list->)))
 
-    ;; augment grammar with start symbol
-    (dolist (i (list *start-symbol* *end-symbol*))
-      (assert (null (gethash i grammar-hash)) nil
-	      "~A is a reserved non-terminal, unfortunately.  Try
+    (augment-grammar grammar-hash (car grammar))
+    grammar-hash))
+
+(defun augment-grammar (hash first-real-symbol)
+  ;; augment grammar with start symbol
+  (dolist (i (list *start-symbol* *end-symbol*))
+    (assert (null (gethash i hash)) nil
+	    "~A is a reserved non-terminal, unfortunately.  Try
 calling MAKE-PARSER with a different END-SYMBOL or START-SYMBOL
 specified."  i))
-    (setf (gethash *start-symbol* grammar-hash)
-	  (list (list (car grammar) *end-symbol*)))
-    grammar-hash))
+  (setf (gethash *start-symbol* hash)
+	(list (list first-real-symbol *end-symbol*))))
 
 (defun non-terminal-p (symbol) (gethash symbol *grammar*))
 (defun grammar-productions (symbol) (gethash symbol *grammar*))
@@ -108,6 +106,8 @@ specified."  i))
 ;;;; PARSE TABLE CONSTRUCTION
 
 (defun first-sets (symbol-list)
+  "Returns the union of the first sets of each symbol in SYMBOL-LIST,
+until either a nullable symbol is found or we run out of symbols."
   (do* ((x-> symbol-list (cdr x->))
 	(s (and x-> (gethash (car x->) *first-set*))
 	   (union s (and x-> (gethash (car x->) *first-set*)))))
@@ -175,37 +175,40 @@ index in STATES."
 (defun make-initial-state ()
   (lalr-closure (make-item-set (make-start-item))))
 
-(defun compute-shifts ()
-  "Computes shift actions and states for the generated parser.  Returns
-a list of shift actions and the state table."
-  (let ((shift-table nil)
-	(states (make-array '(1) :adjustable t :fill-pointer 1
+(defun compute-shifts (table)
+  "Computes shift actions and states for the generated parser.  Adds
+shifts to the parse table as we find them.  Returns the state table."
+  (let ((states (make-array '(1) :adjustable t :fill-pointer 1
 			    :initial-element (make-initial-state))))
-    (do-until-unchanged (states shift-table)
+    (do-until-unchanged (states) ;; XXX also table?
       (dotimes (i (length states))
 	(do-for-each-item (item (aref states i))
-	  (unless (or (dot-at-end-p item)
-		      (eql (symbol-at-dot item) *end-symbol*))
-	    (let* ((x (symbol-at-dot item))
-		   (new-set (lalr-goto (aref states i) x))
-		   (j (add-to-states new-set states)))
-	      (pushnew (list i x j) shift-table :test #'equalp))))))
-    (values shift-table states)))
+	  (maybe-shift table states item i))))
+    states))
+
+;; XXX awful name; refactor.
+(defun maybe-shift (table states item i)
+  (unless (or (dot-at-end-p item)
+	      (eql (symbol-at-dot item) *end-symbol*))
+    (let* ((symbol (symbol-at-dot item))
+	   (new-set (lalr-goto (aref states i) symbol))
+	   (j (add-to-states new-set states))
+	   (action (list (if (non-terminal-p symbol) 'goto 'shift) j)))
+      (add-to-parse-table table i symbol action))))
 
 
-(defun compute-reductions (states)
-  "Compute reduce actions for the generated parser.  Depends on
-*STATE* already being filled, and returns the reduce actions."
-  (let ((reduce-table nil))
-    (dotimes (i (length states))
-      (do-for-each-item (item (aref states i))
-	(when (dot-at-end-p item)
-	  (dolist (j (item-lookahead item))
-	    (pushnew (list i j item) reduce-table :test #'equalp)))))
-    reduce-table))
+(defun compute-reductions (table states)
+  "Compute reduce actions for the generated parser, based on STATES.
+Fills in TABLE with the reduce actions."
+  (dotimes (i (length states))
+    (do-for-each-item (item (aref states i))
+      (when (dot-at-end-p item)
+	(dolist (symbol (item-lookahead item))
+	  (let ((action `(reduce ,(item-lhs item)
+			  ,(length (item-rhs item)))))
+	    (add-to-parse-table table i symbol action)))))))
 
 
-;; XXX revisit
 (defun add-accept-actions (parse-table states)
   "Finds states whose next token should be $ (EOF) and adds accept
 actions to the parse table for those states."
@@ -213,49 +216,43 @@ actions to the parse table for those states."
 	and item = (make-almost-done-item)
 	for i from 0 below n-states
 	when (find item (aref states i) :test #'equalp)
-	do (add-to-parse-table parse-table n-states i *end-symbol* '(accept))))
+	do (add-to-parse-table parse-table i *end-symbol* '(accept))))
 
 
-(defun add-to-parse-table (parse-table n-states i x action)
-  "Adds ACTION to the parse table at (X,I).  Applies braindead
+(defun add-to-parse-table (parse-table state symbol action)
+  "Adds ACTION to the parse table at (SYMBOL,STATE).  Applies braindead
 conflict resolution rule to any conflicts detected."
-  (sunless (gethash x parse-table)
-    (setf it (make-array (list n-states) :initial-element nil)))
-  (aif (aref (gethash x parse-table) i)
-       (progn
-	 ;; XXX should probably collate the number of conflicts
-	 ;; somewhere.
-	 ;; XXX should resolve reduce/reduce conflicts by reducing by
-	 ;; the largest rule.
-	 (warn "~&Conflict at ~A,~A -> last action ~A, new action ~A."
-	       x i it action)
-	 (cond ((and (eql (car it) 'shift) (eql (car action) 'reduce))
-		;; shift-reduce conflict
-		)
-	       ((and (eql (car it) 'reduce) (eql (car action) 'reduce))
-		;; reduce-reduce conflict
-		)
-	       (t (error "This is an unexpected conflict (~A, ~A).  Call a wizard."
-			 it action))))
-       ;;   (assert (null (aref (gethash x parse-table) i)))
-       (setf (aref (gethash x parse-table) i) action)))
+  (sunless (gethash symbol parse-table)
+    (setf it (make-hash-table :test 'equal)))
+  (let ((row (gethash symbol parse-table)))
+    (awhen (gethash state row)
+      (when (equal action it) (return-from add-to-parse-table))
+      (setf action (resolve-collision action it symbol state)))
+    (setf (gethash state row) action)))
 
 
-(defun create-parse-table (shifts reductions states)
-  "Constructs a parse table usable by PARSE, from the list of shift
-and reduce actions, and the set of parse states."
-  (let ((parse-table (make-hash-table))
-	(n-states (length states)))
-    (loop for (i x j) in shifts
-	  and action = (list (if (non-terminal-p x) 'goto 'shift) j)
-	  do (add-to-parse-table parse-table n-states i x action))
+(defun resolve-collision (new-action old-action symbol state)
+  ;; XXX should probably collate the number of conflicts
+  ;; somewhere.
+  (warn "~&Conflict at ~A,~A -> last action ~A, new action ~A."
+	symbol state old-action new-action)
+  (cond ((and (eql (car old-action) 'shift) (eql (car new-action) 'reduce))
+	 old-action)			; S/R => prefer shift.
+	((and (eql (car old-action) 'reduce) (eql (car new-action) 'reduce))
+	 ;; R/R => prefer longer reduction.
+	 (if (>= (third new-action) (third old-action))
+	     new-action
+	     old-action))
+	(t (error "This is an unexpected conflict (~A, ~A).  Call a wizard."
+		  old-action new-action))))
 
-    (loop for (i x j) in reductions
-	  and action = `(reduce ,(item-lhs j) ,(length (item-rhs j)))
-	  do (add-to-parse-table parse-table n-states i x action))
 
+(defun create-parse-table ()
+  "Constructs a parse table usable by PARSE."
+  (let* ((parse-table (make-hash-table))
+	 (states (compute-shifts parse-table)))
+    (compute-reductions parse-table states)
     (add-accept-actions parse-table states)
-
     parse-table))
 
 
@@ -285,12 +282,12 @@ the input (the CAR being the symbol name, the CDR being any
 information the lexer would like to preserve), and advances the input
 one token.  Returns what might pass for a parse tree in some
 countries."
-		  (loop with stack = (list 0)
+  (loop with stack = (list 0)
 	and token = (funcall next-token)
 	and result-stack
 	for row = (gethash (car token) table)
 	for action = (if row 
-			 (aref row (first stack))
+			 (gethash (first stack) row)
 			 (error "~A is not a valid token in this grammar."
 				token))
 	do (case (first action)
@@ -302,8 +299,7 @@ countries."
 		       (pop stack)
 		       (push (pop (cdr result-stack)) (cdar result-stack)))
 		     (destructuring-bind (goto state)
-			 (aref (gethash (second action) table)
-			       (first stack))
+			 (gethash (first stack) (gethash (second action) table))
 		       (assert (eql goto 'goto) () "Malformed parse table!")
 		       (push state stack)))
 	     (accept (return (car result-stack)))
@@ -321,7 +317,7 @@ might pass for a parse tree in some countries."
 	and result-stack
 	for row = (gethash (car token) table)
 	for action = (if row 
-			 (aref row (first stack))
+			 (gethash (first stack) row)
 			 (error "~A is not a valid token in this grammar."
 				token))
 	do (case (first action)
@@ -333,8 +329,7 @@ might pass for a parse tree in some countries."
 		       (pop stack)
 		       (push (pop (cdr result-stack)) (cdar result-stack)))
 		     (destructuring-bind (goto state)
-			 (aref (gethash (second action) table)
-			       (first stack))
+			 (gethash (first stack) (gethash (second action) table))
 		       (assert (eql goto 'goto) () "Malformed parse table!")
 		       (push state stack)))
 	     (accept (return (car result-stack)))
@@ -352,14 +347,10 @@ notably, with the parser name being FN-NAME (default of PARSE)."
   (awhen end-symbol (setf *end-symbol* it))
   (awhen start-symbol (setf *start-symbol* it))
   (let ((*grammar* (process-grammar grammar)))
-    (process-grammar grammar)
     (multiple-value-bind (*first-set* *follow-set* *nullable-set*)
 	(compute-prediction-sets *grammar*)
-      (multiple-value-bind (shifts states) (compute-shifts)
-	(let ((table (create-parse-table shifts 
-					 (compute-reductions states)
-					 states)))
-	  (write-parser-function table package stream fn-name))))))
+      (let ((table (create-parse-table)))
+	(write-parser-function table package stream fn-name)))))
 
 
 ;;;; Testing stuff.
@@ -370,10 +361,7 @@ notably, with the parser name being FN-NAME (default of PARSE)."
     (multiple-value-bind (*first-set* *follow-set* *nullable-set*)
 	(compute-prediction-sets *grammar*)
       (with-input-from-string (*standard-input* string)
-	(multiple-value-bind (shifts states) (compute-shifts)
-	  (parse (create-parse-table shifts 
-				     (compute-reductions states)
-				     states)
-		 #'(lambda () (cons (handler-case (read)
-				      (end-of-file () *end-symbol*))
-				    nil))))))))
+	(parse (create-parse-table)
+	       #'(lambda () (cons (handler-case (read)
+				    (end-of-file () *end-symbol*))
+				  nil)))))))

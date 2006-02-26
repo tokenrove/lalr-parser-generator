@@ -10,36 +10,27 @@ GRAMMAR."
 	(follow (make-hash-table))
 	(first (make-hash-table)))
     (flet ((nullable-p (x) (gethash x nullable)))
-      (do-for-each-terminal (z grammar)
-	(setf (gethash z first) (list z)))
-
-      (do-until-unchanged (first follow nullable)
-	(do-for-each-production (x ys grammar)
-	  (when (every #'nullable-p ys)
-	    (setf (gethash x nullable) t))
-
-	  (do ((i 0 (1+ i))
-	       (k (length ys)))
-	      ((>= i k))
-
-	    ;; Note - subseq 0 0 is NIL, the intended effect here.
-	    (when (every #'nullable-p (subseq ys 0 i))
-	      (setf (gethash x first)
-		    (union (gethash x first)
-			   (gethash (nth i ys) first))))
-
-	    (when (every #'nullable-p (subseq ys (1+ i) k))
-	      (setf (gethash (nth i ys) follow)
-		    (union (gethash (nth i ys) follow)
-			   (gethash x follow))))
-
-	    (loop for j from (1+ i) to k
-		  when (every #'nullable-p (subseq ys (1+ i) j))
-		  do (setf (gethash (nth i ys) follow)
-			   (union (gethash (nth i ys) follow)
-				  (gethash (nth j ys) first)))))))
-
-      (values first follow nullable))))
+      (macrolet ((setf-union (dst src)
+		   `(setf (gethash ,@dst) (union (gethash ,@dst)
+					   (gethash ,@src)))))
+	(do-for-each-terminal (z grammar)
+	  (setf (gethash z first) (list z)))
+	(do-until-unchanged (first follow nullable)
+	  (do-for-each-production (x ys grammar)
+	    (when (every #'nullable-p ys)
+	      (setf (gethash x nullable) t))
+	    (loop with k = (length ys)
+		  for i below k
+		  ;; Note - subseq 0 0 is NIL, the intended effect here.
+		  when (every #'nullable-p (subseq ys 0 i))
+		  do (setf-union (x first) ((nth i ys) first))
+		  when (every #'nullable-p (subseq ys (1+ i) k))
+		  do (setf-union ((nth i ys) follow) (x follow))
+		  do (loop for j from (1+ i) to k
+			   when (every #'nullable-p (subseq ys (1+ i) j))
+			   do (setf-union ((nth i ys) follow)
+					  ((nth j ys) first))))))
+	(values first follow nullable)))))
 
 ;;; The following three functions are just for testing.  Combined,
 ;;; they perform the same functions as COMPUTE-PREDICTION-SETS
