@@ -13,12 +13,5 @@ generator.  Also, the default mode of operation for this package is to
 write the tables and parser to a stream, so you don't need to have
 this package around at runtime.
 
-
-Test suite:
-
-Unit tests and system tests.
-
- - should verify that the output parser can parse some statements in
-the given language;
- - should check number of shift/reduce and reduce/reduce conflicts
-against known values.
+Look at tests.lisp (or m68k-grammar.lisp in the m68k-assembler package)
+for examples of the grammar form.
