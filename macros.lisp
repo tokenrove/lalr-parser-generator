@@ -61,6 +61,9 @@ EQUALP) between iterations."
   "Iterate VAR across the item-set SET."
   `(dovector (,var ,set) ,@body))
 
+
+(defmacro unionf (dst src) `(setf ,dst (union ,dst ,src)))
+
 ;;; grammar traversal
 
 (defmacro do-for-each-production ((lhs rhs grammar) &body body)

@@ -64,8 +64,7 @@ non-destructive."
 	 (la-of-a (item-lookahead item))
 	 (la-of-b (item-lookahead (aref set i))))
     (unless (equal la-of-a la-of-b)
-      (setf (item-lookahead (aref set i))
-	    (union la-of-a la-of-b)))))
+      (unionf (item-lookahead (aref set i)) la-of-a))))
 
 (defun item-set-equal-ignoring-la (set-a set-b)
   (when (= (length set-a) (length set-b))
@@ -157,7 +156,7 @@ until either a nullable symbol is found or we run out of symbols."
   (macrolet ((la (set) `(item-lookahead (aref ,set i))))
     (dotimes (i (length dst))
       (unless (equal (la dst) (la src))
-	(setf (la dst) (union (la dst) (la src)))))))
+	(unionf (la dst) (la src))))))
 
 (defun add-to-states (set states)
   "Adds SET to STATES, either by merging it with another set which is
